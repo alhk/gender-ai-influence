@@ -244,7 +244,7 @@ pred <- predictions(
 
   overall_mean <- mean(pred$estimate)
 
-  ggplot(pred, aes(x = estimate, y = condition,
+fig2 <-   ggplot(pred, aes(x = estimate, y = condition,
                    color = partner_type,
                    linetype = task_type)) +
     geom_vline(xintercept = overall_mean, linetype = "dashed", linewidth = 0.4) +
@@ -270,6 +270,9 @@ pred <- predictions(
       legend.position = "none"   
     )
 
+print(fig2)
+ggsave("fig2.pdf", fig1, width = 7, height = 5, bg = "white")
+ggsave("fig2.png", fig1, width = 7, height = 5, bg = "white")
 ```
 
 
