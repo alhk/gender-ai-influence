@@ -271,8 +271,8 @@ fig2 <-   ggplot(pred, aes(x = estimate, y = condition,
     )
 
 print(fig2)
-ggsave("fig2.pdf", fig1, width = 7, height = 5, bg = "white")
-ggsave("fig2.png", fig1, width = 7, height = 5, bg = "white")
+ggsave("fig2.pdf", fig2, width = 7, height = 5, bg = "white")
+ggsave("fig2.png", fig2, width = 7, height = 5, bg = "white")
 ```
 
 
