@@ -1,0 +1,354 @@
+---
+title: "AI tasks study"
+format: html
+---
+
+```{r}
+#| echo: false
+library(here)
+library(tidyverse)
+library(lme4)
+```
+
+Read in the data:
+```{r}
+df <- read_csv(here("data-share", "ai-tasks-data.csv"))
+```
+
+How many distinct participants finished the study?
+```{r}
+df %>% 
+  filter(Progress >= 99) %>% # for some reason, many people didn't "finish" (Finished == TRUE) even though they answered all questions - may have required one more button click. so we do progress > = 99 instead
+  # summarise(n = n_distinct(QID443)) # double checking there are no finished duplicates. there's one dup according to Prolific ID. I removed Prolific ID, an indirect identifier, from the public dataset. so this is just for posterity. The dup ResponseIds were R_151DPC5tg0tNTVv and R_7e4FL0m3fBW126N. I removed the second from the data.
+  summarise(n = n())
+```
+
+Gender of sample:
+```{r}
+df %>% 
+filter(Progress >= 99) %>%
+  group_by(Q836) %>% 
+  tally() %>% 
+  mutate(pct = round((n/sum(n)*100), 1))
+```
+
+Age of sample:
+```{r}
+df %>% 
+  filter(Progress >= 99) %>%
+  group_by(Q837) %>% 
+  tally() %>% 
+  mutate(pct = round((n/sum(n)*100), 1))
+```
+
+Race of sample:
+```{r}
+df %>% 
+ filter(Progress >= 99) %>%
+  group_by(Q828) %>% 
+  tally() %>% 
+  mutate(pct = round((n/sum(n)*100), 1))
+```
+
+Recoding race to control for these in a follow-up model:
+```{r}
+df <- df %>% 
+  mutate(race = ifelse(Q828 == "Black/African American", "Black",
+                           ifelse(Q828 == "White/Caucasian", "White",
+                                  ifelse(Q828 == 
+                                           "Asian American or Pacific Islander", "Asian", "Other"))),
+         latino = ifelse(Q827 == "Yes", 1, 0) )
+```
+
+
+Add variable for manip check
+
+```{r}
+df <- df %>% 
+  mutate(manipCheckCorrect = ifelse(ai_name=="Oliver" & maleAI==1, 1,
+                                  ifelse(ai_name=="Olivia" & maleAI==0, 1, 0)))
+
+```
+
+How many people after dropping DNFs and failing the manip check?
+```{r}
+df %>% 
+  filter(Progress >= 99, manipCheckCorrect == 1) %>% 
+    tally()
+
+df %>% 
+  filter(Progress >= 99) %>% # of those who finsihed, how many per condition failed?
+  group_by(manipCheckCorrect, contrastTask, femaleAI) %>% 
+  tally() 
+```
+
+Clean data dropping DNFs and failed manip check folks
+```{r}
+df_clean <- df %>% 
+    filter(Progress >= 99, manipCheckCorrect == 1)
+```
+
+Long data:
+```{r}
+df_long <- df_clean %>%
+  pivot_longer(
+    cols = c(starts_with("match_Q"), starts_with("changeQ")),
+    names_to = c(".value", "round"),
+    names_pattern = "(match_Q|changeQ)(\\d+)"
+  ) %>%
+  mutate(round = as.numeric(round)) %>%
+  arrange(ResponseId, round) %>% 
+ mutate(defer = ifelse(match_Q=="FALSE", changeQ, NA)) # defer variable so if we match the round isn't anlayzed
+  
+```
+
+Recode gender:
+```{r}
+df_long <- df_long %>% 
+  mutate(participantF = ifelse(Q836 == "Woman", 1,
+                 ifelse(Q836== "Man", 0, NA)),
+  participantF2 = ifelse(Q836 == "Woman", 1, 0) # collapse other into male category for interactions since other is so tiny
+  )
+```
+
+
+Again, there is an anomalously high rate of deference in round 2, but only for the workplace task:
+```{r}
+df_long %>% 
+  group_by(round, contrastTask) %>% 
+  summarise(mean_defer = mean(defer, na.rm=TRUE)) %>% 
+  print(n = Inf)
+```
+
+Let's check this with z scores:
+
+```{r}
+round_means <- df_long %>%
+  group_by(round, contrastTask) %>%
+  summarize(mean_defer = mean(defer, na.rm = TRUE), .groups = "drop") %>%
+  mutate(z_score = as.numeric(scale(mean_defer)))
+round_means
+print(round_means, n = Inf)
+```
+
+So we remove round 2. There's a few ways we could do this. To be consistent across conditions, we could drop round 2 for everyone. Alternatively, since contrast was fine, we could drop round 2 only for those who did workplace. Let's do both and make sure the results look the same either way (and saving a version with it still in there, for later). I'm also recoding round in case we do any round interactions later:
+```{r}
+
+df_long_old <- df_long %>% 
+  mutate(round0 = as.numeric(round) - 1)
+
+df_long_no_round_2_workplace <- df_long %>% 
+  mutate(drop_round_2_workplace= ifelse(round == 2 & contrastTask==0, 1, 0),
+         drop_round_2 = ifelse(round == 2, 1, 0)) %>% 
+  mutate(round0 = as.numeric(round) - 1) %>% 
+  filter(drop_round_2_workplace == 0) 
+
+df_long_clean <- df_long_no_round_2_workplace %>% 
+  filter(drop_round_2 == 0)
+  
+```
+
+Let's do empty models to see if we need random intercepts:
+```{r}
+m_empty <- glm(defer ~ 1, 
+              data=df_long_clean, family=binomial("logit"))
+summary(m_empty)
+
+m_int<- glmer(defer ~ 1 
+                    + (1|ResponseId),
+                    data=df_long_clean, family=binomial("logit"))
+summary(m_int)
+
+anova(m_int, m_empty)
+```
+
+Models in Table 2:
+```{r}
+m1 <- glmer(defer ~ contrastTask*femaleAI + round0
+            + (1|ResponseId),
+            data=df_long_clean, family=binomial("logit"),control = glmerControl(
+              optimizer = "bobyqa",
+              optCtrl = list(maxfun = 2e5)))
+summary(m1)
+
+m2 <- glmer(defer ~ contrastTask*femaleAI*participantF2 + round0
+            + (1|ResponseId),
+            data=df_long_clean, family=binomial("logit"),control = glmerControl(
+              optimizer = "bobyqa",
+              optCtrl = list(maxfun = 2e5)))
+summary(m2)
+
+anova(m1, m2)
+```
+
+Alt version, with item 2 only dropped for workplace:
+```{r}
+m1_alt <- glmer(defer ~ contrastTask*femaleAI + round0
+            + (1|ResponseId),
+            data=df_long_no_round_2_workplace, family=binomial("logit"),control = glmerControl(
+              optimizer = "bobyqa",
+              optCtrl = list(maxfun = 2e5)))
+summary(m1_alt)
+
+m2_alt <- glmer(defer ~ contrastTask*femaleAI*participantF2 + round0
+            + (1|ResponseId),
+            data=df_long_no_round_2_workplace, family=binomial("logit"),control = glmerControl(
+              optimizer = "bobyqa",
+              optCtrl = list(maxfun = 2e5)))
+summary(m2_alt)
+```
+
+
+
+
+Create Table 2:
+```{r}
+library(sjPlot)
+tab_model(m1, m2,
+          p.style="stars", 
+          string.est="Odds Ratio",
+          string.se = "SE",
+          string.ci= "95% CI",
+          show.se= TRUE, 
+          dv.labels=c("Model 1", "Model 2"),
+          show.re.var = FALSE, 
+          show.icc = FALSE, 
+          show.aic = TRUE,
+          show.r2=FALSE,
+          show.ngroups = FALSE
+)
+
+```
+
+Make figure 2:
+
+```{r}
+pred <- predictions(
+    m1,
+    newdata = datagrid(
+      contrastTask = c(0, 1),
+      femaleAI  = c(0, 1)
+    ),
+    type = "response",
+    re.form = NA
+  ) %>%
+    as.data.frame() %>%
+    mutate(
+      partner_type   = ifelse(femaleAI == 1, "Female AI partner,", "Male AI partner,"),
+      task_type = ifelse(contrastTask == 1, "Contrast sensitivity", "Workplace decisions"),
+      condition = paste(partner_type, task_type),
+
+      # Sort from highest to lowest probability
+      condition = fct_reorder(condition, estimate)
+    )
+
+  overall_mean <- mean(pred$estimate)
+
+  ggplot(pred, aes(x = estimate, y = condition,
+                   color = partner_type,
+                   linetype = task_type)) +
+    geom_vline(xintercept = overall_mean, linetype = "dashed", linewidth = 0.4) +
+    geom_pointrange(aes(xmin = conf.low, xmax = conf.high), linewidth = 0.8) +
+    scale_linetype_manual(values = c(
+      "Contrast sensitivity" = "solid",
+      "Workplace decisions"    = "dashed"
+    )) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+    labs(
+      x = "Predicted probability of deference (95% CI)",
+      y = NULL
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      legend.position = "none"   
+    ) +
+    ggthemes::theme_clean(base_size = 15) +
+    theme(
+      plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+      axis.title = element_text(size = 16, face = "bold"),
+      axis.text = element_text(size = 14),
+      legend.position = "none"   
+    )
+
+```
+
+
+
+
+Appendix - image showing high rates of deference in R2 of workplace task
+```{r}
+# defer by item
+
+line <- df_long %>%
+  filter(!is.na(defer)) %>% # drop the NAs (wehre we matched)
+  mutate(
+    aiLabel = ifelse(contrastTask == 1, "Contrast sensitivity task", "Workplace decisions task"),
+    femLabel = ifelse(maleAI==1, "Male AI", "Female AI"))
+
+line %>%
+  ggplot(aes(round, defer, linetype=aiLabel, color=aiLabel)) +
+  stat_summary(fun = "mean", geom = "line", aes(group=aiLabel), size= 1) +
+  stat_summary(fun.data = mean_se, geom = "errorbar", width = .2) +
+  facet_grid(cols=vars(femLabel)) +
+  scale_x_continuous(limits=c(-.5, 20.5))+
+  scale_y_continuous(limits=c(0, 1)) +
+  scale_color_brewer(palette="Set1") +
+  ggthemes::theme_clean() +
+  theme(legend.title = element_blank(),
+        legend.position = "top",
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text = element_text(size=15),
+        strip.text.x = element_text(size=15),
+        axis.title = element_text(size=15),
+        plot.title=element_text(size=20),
+        legend.text=element_text(size=15)
+  ) +
+  labs(#title = "Giving patterns over time, by condition",
+    x= "\nItem (Round)",
+    y="Proportion deferring") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+Appendix - models with demos, and item 2 included
+```{r}
+m1b <- glmer(defer ~ contrastTask*femaleAI + round0
+             +  Q837 + relevel(as.factor(race), ref = "Other") + latino 
+            + Q836
+            + (1|ResponseId),
+            data=df_long_clean, family=binomial("logit"),control = glmerControl(
+              optimizer = "bobyqa",
+              optCtrl = list(maxfun = 2e5)))
+summary(m1b)
+
+m1c <- glmer(defer ~ contrastTask*femaleAI + round0
+             +  Q837 + relevel(as.factor(race), ref = "Other") + latino 
+            + Q836
+            + (1|ResponseId),
+            data=df_long_old, family=binomial("logit"),control = glmerControl(
+              optimizer = "bobyqa",
+              optCtrl = list(maxfun = 2e5)))
+summary(m1c)
+```
+
+
+Make appendix table with the demos (m1b) and including item 2 (m1c)
+```{r}
+tab_model(m1b, m1c,
+          p.style="stars", 
+          string.est="Odds Ratio",
+          string.se = "SE",
+          string.ci= "95% CI",
+          show.se= TRUE, 
+          dv.labels=c("Model 1", "Model 2"),
+          show.re.var = FALSE, 
+          show.icc = FALSE, 
+          show.aic = FALSE,
+          show.r2=FALSE,
+          show.ngroups = FALSE
+)
+
+```
+
+

@@ -1,0 +1,442 @@
+---
+title: "Human-AI study"
+format: html
+---
+
+```{r}
+#| echo: false
+library(here)
+library(tidyverse)
+library(lme4)
+```
+
+Read in the data:
+```{r}
+df <- read_csv(here("data-share", "human-ai-study.csv"))
+```
+
+How many distinct participants finished the study?
+```{r}
+df %>% 
+  filter(Finished == TRUE) %>% 
+  summarise(n = n())
+```
+
+Gender of sample:
+```{r}
+df %>% 
+filter(Finished == TRUE) %>%
+  group_by(Q836) %>% 
+  tally() %>% 
+  mutate(pct = round((n/sum(n)*100), 1))
+```
+
+Age of sample:
+```{r}
+df %>% 
+  filter(Finished == TRUE) %>%
+  group_by(Q837) %>% 
+  tally() %>% 
+  mutate(pct = round((n/sum(n)*100), 1))
+```
+
+Race of sample:
+```{r}
+df %>% 
+ filter(Finished == TRUE) %>%
+  group_by(Q828) %>% 
+  tally() %>% 
+  mutate(pct = round((n/sum(n)*100), 1))
+```
+
+Recoding race to control for these in a follow-up model:
+```{r}
+df <- df %>% 
+  mutate(race = ifelse(Q828 == "Black/African American", "Black",
+                           ifelse(Q828 == "White/Caucasian", "White",
+                                  ifelse(Q828 == 
+                                           "Asian American or Pacific Islander", "Asian", "Other"))),
+         latino = ifelse(Q827 == "Yes", 1, 0) )
+```
+
+How many participants failed the manip check?
+
+```{r}
+df <- df %>% 
+  mutate(manipCheckCorrect = 
+           ifelse(aiPartner==1 & malePartner==1 &  
+                    ai_name=="Oliver", 1, 
+        ifelse(aiPartner==1 & malePartner==0 & ai_name=="Olivia", 
+               1,
+         ifelse(aiPartner==0 & malePartner==1 & 
+                  partner_gender=="Man", 1,
+         ifelse(aiPartner==0 & malePartner==0 & 
+                  partner_gender=="Woman", 1, 0))))) 
+
+df %>% 
+  group_by(manipCheckCorrect, aiPartner, malePartner) %>% 
+  tally() # here we look at how many people per condition failed the manip check. 
+```
+
+How many people after dropping DNFs and failing the manip check?
+```{r}
+df %>% 
+  filter(Finished == TRUE, manipCheckCorrect == 1) %>% 
+    tally()
+```
+
+
+Function to recode the rounds. 
+```{r}
+for (i in 1:20) {
+  df[[paste0("match_", i)]] <- ifelse(
+    is.na(df[[paste0("O_decision_", i)]]) | is.na(df[[paste0("P_decision_", i)]]),
+    NA,
+    as.integer(df[[paste0("O_decision_", i)]] == df[[paste0("P_decision_", i)]])
+  )
+  
+  df[[paste0("change_", i)]] <- ifelse(
+    is.na(df[[paste0("wq", i, "r")]]) | is.na(df[[paste0("wq", i, "c")]]),
+    NA,
+    as.integer(df[[paste0("wq", i, "r")]] != df[[paste0("wq", i, "c")]])
+  )
+}
+```
+
+Make long dataset, with DNFs and failed manip checks removed:
+
+```{r}
+df_long <- df %>% 
+     filter(Finished== TRUE, manipCheckCorrect == 1) %>%
+  pivot_longer(
+    cols = c(paste0("match_", 1:20), paste0("change_", 1:20)),
+    names_to = c(".value", "round"),
+    names_pattern = "(match|change)_(\\d+)"
+  )
+```
+
+In the clean data, we need to turn match to NA when it was an agree round. We don't want to count those as changes. I also want to add a condition variable and participant gender var.
+```{r}
+df_long_clean <- df_long %>% 
+  mutate(defer = ifelse(match==0, change, NA),
+  condition = ifelse(aiPartner==1 & femalePartner==1, "Olivia",
+              ifelse(aiPartner==1 & femalePartner==0, "Oliver",
+              ifelse(aiPartner==0 & femalePartner==1, "Woman", "Man"))),
+  participantF = ifelse(QID2 == "Woman", 1,
+                 ifelse(QID2== "Man", 0, NA)),
+  participantF2 = ifelse(QID2 == "Woman", 1, 0) # collapse other into male category for interactions since other is so tiny
+  )
+```
+
+There is an anomalously high rate of deference in round 2:
+```{r}
+df_long_clean %>% 
+  group_by(round) %>% 
+  summarise(mean_defer = mean(defer, na.rm=TRUE)) 
+```
+
+So we remove round 2 (and saving a version with it still in there, for later). I'm also recoding round in case we do any round interactions later:
+```{r}
+
+df_long_old <- df_long_clean %>% 
+  mutate(round0 = as.numeric(round) - 1)
+
+df_long_clean <- df_long_clean %>% 
+  filter(round != 2) %>% 
+  mutate(round0 = as.numeric(round) - 1)
+  
+```
+
+Let's do empty models to see if we need random intercepts:
+```{r}
+m_empty <- glm(defer ~ 1, 
+              data=df_long_clean, family=binomial("logit"))
+summary(m_empty)
+
+m_int<- glmer(defer ~ 1 
+                    + (1|ResponseId),
+                    data=df_long_clean, family=binomial("logit"))
+summary(m_int)
+
+anova(m_int, m_empty)
+```
+
+Table 1 Models:
+```{r}
+
+m1 <- glmer(defer ~ femalePartner*humanPartner 
+            + round0
+            + (1|ResponseId), 
+            data=df_long_clean,
+            family=binomial("logit"),control = glmerControl(
+              optimizer = "bobyqa",
+              optCtrl = list(maxfun = 2e5)))
+summary(m1)
+
+m2 <- glmer(defer ~ femalePartner + humanPartner
+            + round0
+            + femalePartner*humanPartner*participantF2
+            + (1|ResponseId), 
+            data=df_long_clean,
+            family=binomial("logit"),control = glmerControl(
+              optimizer = "bobyqa",
+              optCtrl = list(maxfun = 2e5)))
+summary(m2)
+
+anova(m1, m2)
+```
+
+Create Table 1:
+```{r}
+library(sjPlot)
+tab_model(m1, m2,
+          p.style="stars", 
+          string.est="Odds Ratio",
+          string.se = "SE",
+          string.ci= "95% CI",
+          show.se= TRUE, 
+          dv.labels=c("Model 1", "Model 2"),
+          show.re.var = FALSE, 
+          show.icc = FALSE, 
+          show.aic = TRUE,
+          show.r2=FALSE,
+          show.ngroups = FALSE
+)
+
+```
+
+Get predicted probailities:
+```{r}
+library(marginaleffects)
+
+# conditional gender effects
+comparisons(
+  m1,
+  variables = list(femalePartner = c(0,1)),
+  by = "humanPartner",
+  type = "response",
+  re.form = NA
+)
+
+# conditional partner-type effects
+comparisons(
+  m1,
+  variables = list(humanPartner = c(0,1)),
+  by = "femalePartner",
+  type = "response",
+  re.form = NA
+)
+
+# predicted probabilities
+predictions(
+  m1,
+  newdata = datagrid(
+    femalePartner = c(0,1),
+    humanPartner = c(0,1)
+  ),
+  type = "response",
+  re.form = NA
+)
+```
+
+Make Figure 1
+```{r}
+
+# Take those predictions and plot them for a figure. 
+pred <- predictions(
+    m1,
+    newdata = datagrid(
+        femalePartner = c(0, 1),
+        humanPartner  = c(0, 1)
+    ),
+    type = "response",
+    re.form = NA
+) %>%
+    as.data.frame() %>%
+    mutate(
+        partner_type   = ifelse(humanPartner == 1, "human partner", "AI partner"),
+        partner_gender = ifelse(femalePartner == 1, "Female", "Male"),
+        condition = paste(partner_gender, partner_type),
+        
+        # sort from highest to lowest probability
+        condition = fct_reorder(condition, estimate)
+    )
+
+overall_mean <- mean(pred$estimate) # to show mean line
+
+fig1 <- ggplot(pred, aes(x = estimate, y = condition,
+                 color = partner_gender,
+                 linetype = partner_type)) +
+    geom_vline(xintercept = overall_mean, linetype = "dashed", linewidth = 0.4) +
+    geom_pointrange(aes(xmin = conf.low, xmax = conf.high), linewidth = 0.8) +
+    scale_linetype_manual(values = c(
+        "human partner" = "solid",
+        "AI partner"    = "dashed"
+    )) +
+    scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+    labs(
+        x = "Predicted probability of deference (95% CI)",
+        y = NULL
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+        legend.position = "none"  
+    ) + 
+   ggthemes::theme_clean(base_size = 15) +
+  theme(
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14),
+    legend.position = "none"   
+  )
+
+print(fig1)
+ggsave("fig1.pdf", fig1, width = 7, height = 5, bg = "white")
+ggsave("fig1.png", fig1, width = 7, height = 5, bg = "white")
+```
+
+
+Assessing robustness with participant's gender, race, age:
+```{r}
+
+m1b <- glmer(defer ~ femalePartner*humanPartner 
+            + round0
+            + Q837 + relevel(as.factor(race), ref = "Other") + latino 
+            + QID2
+            + (1|ResponseId), 
+            data=df_long_clean,
+            family=binomial("logit"),control = glmerControl(
+              optimizer = "bobyqa",
+              optCtrl = list(maxfun = 2e5)))
+summary(m1b)
+
+
+```
+
+
+Let's see what our key model looks like when we include item 2:
+
+```{r}
+m1c <- glmer(defer ~ femalePartner*humanPartner 
+            + round0 
+           + QID2 + relevel(as.factor(race), ref = "Other") + latino + Q837
+            + (1|ResponseId), 
+            data=df_long_old, #using old saved datasaet with round 2
+            family=binomial("logit"),control = glmerControl(
+              optimizer = "bobyqa",
+              optCtrl = list(maxfun = 2e5)))
+summary(m1c)
+
+```
+
+Make appendix table with the demos (m1b) and including item 2 (m1c)
+```{r}
+tab_model(m1b, m1c,
+          p.style="stars", 
+          string.est="Odds Ratio",
+          string.se = "SE",
+          string.ci= "95% CI",
+          show.se= TRUE, 
+          dv.labels=c("Model 1", "Model 2"),
+          show.re.var = FALSE, 
+          show.icc = FALSE, 
+          show.aic = FALSE,
+          show.r2=FALSE,
+          show.ngroups = FALSE
+)
+
+```
+
+
+Post-study questions ...
+
+Here's the short dataset with manip check failures removed:
+```{r}
+df_clean <- df %>% 
+     filter(Progress >= 99, manipCheckCorrect == 1)
+```
+
+
+Models for each of the post-study questions:
+```{r}
+m_x <- lm(competent_1 ~ femalePartner + humanPartner ,
+            data=df_clean)
+summary(m_x)
+
+m_x2 <- lm(competent_2 ~ femalePartner + humanPartner ,
+            data=df_clean)
+summary(m_x2)
+
+m_x3 <- lm(competent_3 ~ femalePartner + humanPartner ,
+            data=df_clean)
+summary(m_x3)
+
+m_x4 <- lm(competent_4 ~ femalePartner + humanPartner ,
+            data=df_clean)
+summary(m_x4)
+
+m_x5 <- lm(competent_5 ~ femalePartner + humanPartner ,
+            data=df_clean)
+summary(m_x5)
+
+# with the interactions
+
+m_x_b <- lm(competent_1 ~ femalePartner*humanPartner ,
+            data=df_clean)
+summary(m_x_b)
+
+m_x2_b <- lm(competent_2 ~ femalePartner*humanPartner ,
+            data=df_clean)
+summary(m_x2_b)
+
+m_x3_b <- lm(competent_3 ~ femalePartner*humanPartner ,
+            data=df_clean)
+summary(m_x3_b)
+
+m_x4_b <- lm(competent_4 ~ femalePartner*humanPartner ,
+            data=df_clean)
+summary(m_x4_b)
+
+m_x5_b <- lm(competent_5 ~ femalePartner*humanPartner ,
+            data=df_clean)
+summary(m_x5_b)
+```
+
+Appendix - image showing high rates of deference in R2 
+```{r}
+
+line <- df_long_old %>%
+  filter(!is.na(defer)) %>% # drop the NAs (wehre we matched)
+  mutate(
+    partnerLabel = ifelse(humanPartner == 1, "Human partner", "AI partner"),
+    femLabel = ifelse(femalePartner==1, "Male", "Female"),
+    new_round = as.numeric(round))
+
+line %>%
+  ggplot(aes(new_round, defer, linetype=partnerLabel, color= partnerLabel)) +
+  stat_summary(fun = "mean", geom = "line", aes(group=partnerLabel), size= 1) +
+  stat_summary(fun.data = mean_se, geom = "errorbar", width = .2) +
+  facet_grid(cols=vars(femLabel)) +
+  scale_x_continuous(limits=c(-.5, 20.5))+
+  scale_y_continuous(limits=c(0, 1)) +
+  scale_color_brewer(palette="Set1") +
+  ggthemes::theme_clean() +
+  theme(legend.title = element_blank(),
+        legend.position = "top",
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        axis.text = element_text(size=15),
+        strip.text.x = element_text(size=15),
+        axis.title = element_text(size=15),
+        plot.title=element_text(size=20),
+        legend.text=element_text(size=15)
+  ) +
+  labs(#title = "Giving patterns over time, by condition",
+    x= "\nItem (Round)",
+    y="Proportion deferring") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+
+
